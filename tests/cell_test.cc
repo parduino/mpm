@@ -66,6 +66,15 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
     }
   }
 
+  //! Check cell rank
+  SECTION("Check cell rank") {
+    mpm::Index id = 0;
+    auto cell = std::make_shared<mpm::Cell<Dim>>(id, Nnodes, element, true);
+    REQUIRE(cell->rank() == 0);
+    cell->rank(1);
+    REQUIRE(cell->rank() == 1);
+  }
+
   SECTION("Add nodes") {
     mpm::Index id = 0;
     auto cell = std::make_shared<mpm::Cell<Dim>>(id, Nnodes, element, true);
@@ -95,12 +104,31 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
     REQUIRE(cell->mean_length() == std::numeric_limits<double>::max());
     // Check volume before initialisation
     REQUIRE(cell->volume() ==
-            Approx(std::numeric_limits<double>::max()).epsilon(Tolerance));
+            Approx(std::numeric_limits<double>::lowest()).epsilon(Tolerance));
 
     // Initialise cell
     REQUIRE(cell->initialise() == true);
     // Check if cell is initialised, after addition of nodes
     REQUIRE(cell->is_initialised() == true);
+
+    // Check MPI rank
+    SECTION("Assign and check MPI rank on nodes") {
+      cell->rank(1);
+      REQUIRE(cell->rank() == 1);
+      cell->assign_mpi_rank_to_nodes();
+
+      REQUIRE(node0->mpi_ranks().size() == 1);
+      REQUIRE(node1->mpi_ranks().size() == 1);
+      REQUIRE(node2->mpi_ranks().size() == 1);
+      REQUIRE(node3->mpi_ranks().size() == 1);
+
+      // Update MPI rank of cell
+      REQUIRE(cell->previous_mpirank() == 0);
+      REQUIRE(cell->rank() == 1);
+      cell->rank(2);
+      REQUIRE(cell->rank() == 2);
+      REQUIRE(cell->previous_mpirank() == 1);
+    }
 
     // Check cell length calculation
     SECTION("Compute mean length of cell") {
@@ -183,26 +211,36 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
       }
 
       SECTION("Check if a point is in a cell") {
+        Eigen::Vector2d xi;
         // Check point in cell
         Eigen::Vector2d point;
         point << 0.5, 0.5;
+
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
 
         // Check point on vertex
         point << 0., 0.;
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
+        REQUIRE(xi(0) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(1) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
 
         // Check point on edge
         point << 0.5, 0.;
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
+        REQUIRE(xi(0) ==
+                Approx(-0.5).epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(1) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
 
         // Check point outside
         point << -2, 2.;
         REQUIRE(cell->point_in_cartesian_cell(point) == false);
-        REQUIRE(cell->is_point_in_cell(point) == false);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == false);
       }
 
       // Find local coordinates of a point in a cell
@@ -271,8 +309,9 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
         Eigen::Vector2d point;
         point << 2.1875, 3.25;
 
+        Eigen::Vector2d xi;
         // Test if point is in cell
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
 
         // Coordinates of the point in an unit cell
         Eigen::Matrix<double, 2, 1> point_unit_cell;
@@ -289,7 +328,7 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
         point1 << 2., 1.;
 
         // Test if point is in cell
-        REQUIRE(cell->is_point_in_cell(point1) == true);
+        REQUIRE(cell->is_point_in_cell(point1, &xi) == true);
 
         // Coordinates of the point in an unit cell
         Eigen::Matrix<double, 2, 1> point_unit_cell1;
@@ -440,16 +479,24 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
             REQUIRE(local_point[j] ==
                     Approx(quadrature(j, i)).epsilon(Tolerance));
         }
+
+        // Assign quadrature 4x4
+        cell->assign_quadrature(4);
+
+        points = cell->generate_points();
+        REQUIRE(points.size() == 16);
+
+        auto quad16 = std::make_shared<mpm::QuadrilateralQuadrature<Dim, 16>>();
+        quadrature = quad16->quadratures();
+        // Check if the output coordinates match local quadratures
+        for (unsigned i = 0; i < points.size(); ++i) {
+          auto local_point = cell->transform_real_to_unit_cell(points.at(i));
+          for (unsigned j = 0; j < Dim; ++j)
+            REQUIRE(local_point[j] ==
+                    Approx(quadrature(j, i)).epsilon(Tolerance));
+        }
       }
     }
-  }
-
-  SECTION("Add neighbours") {
-    auto cell = std::make_shared<mpm::Cell<Dim>>(0, Nnodes, element);
-    auto neighbourcell = std::make_shared<mpm::Cell<Dim>>(1, Nnodes, element);
-    REQUIRE(cell->nneighbours() == 0);
-    cell->add_neighbour(0, neighbourcell);
-    REQUIRE(cell->nneighbours() == 1);
   }
 
   SECTION("Check shape functions") {
@@ -488,14 +535,17 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
   SECTION("Test particle addition deletion") {
     mpm::Index pid = 0;
     auto cell = std::make_shared<mpm::Cell<Dim>>(0, Nnodes, element);
-    REQUIRE(cell->nparticles() == 0);
     REQUIRE(cell->status() == false);
+    REQUIRE(cell->nparticles() == 0);
     REQUIRE(cell->add_particle_id(pid) == true);
     REQUIRE(cell->status() == true);
     REQUIRE(cell->nparticles() == 1);
+    REQUIRE(cell->particles().size() == 1);
+    REQUIRE(cell->particles().at(0) == pid);
     cell->remove_particle_id(pid);
     REQUIRE(cell->status() == false);
     REQUIRE(cell->nparticles() == 0);
+    REQUIRE(cell->particles().size() == 0);
   }
 
   SECTION("Test node status") {
@@ -535,389 +585,12 @@ TEST_CASE("Cell is checked for 2D case", "[cell][2D]") {
     for (const auto& node : nodes) REQUIRE(node->status() == false);
   }
 
-  SECTION("Test particle information mapping") {
-    mpm::Index id = 0;
-    auto cell = std::make_shared<mpm::Cell<Dim>>(id, Nnodes, element);
-    cell->add_node(0, node0);
-    cell->add_node(1, node1);
-    cell->add_node(2, node2);
-    cell->add_node(3, node3);
-
-    // Initialise cell
-    REQUIRE(cell->initialise() == true);
-
-    // Create a vector of node pointers
-    std::vector<std::shared_ptr<mpm::NodeBase<Dim>>> nodes{node0, node1, node2,
-                                                           node3};
-
-    // 4-noded quadrilateral shape functions
-    std::shared_ptr<mpm::Element<Dim>> element =
-        Factory<mpm::Element<Dim>>::instance()->create("ED2Q4");
-
-    // Local coordinate of a particle
-    Eigen::Vector2d xi = Eigen::Vector2d::Zero();
-    // Particle mass
-    double pmass = 4.;
-    // Particle pressure
-    double ppressure = 12.;
-    // Particle volume
-    double pvolume = 8.;
-    // Particle velocity
-    Eigen::Vector2d pvelocity;
-    pvelocity << 1., 1.;
-    // Particle gravity
-    Eigen::Vector2d pgravity;
-    pgravity << 0., 9.814;
-    // Phase
-    unsigned phase = 0;
-    // Nodal coordinates
-    Eigen::Matrix<double, 4, Dim> coords;
-    // clang-format off
-      coords << 0., 0.,
-                2., 0.,
-                2., 2.,
-                0., 2.;
-    // clang-format on
-
-    const auto shapefns_xi =
-        element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                         Eigen::Matrix<double, Dim, 1>::Zero());
-    const auto bmatrix =
-        element->bmatrix(xi, coords, Eigen::Matrix<double, Dim, 1>::Zero(),
-                         Eigen::Matrix<double, Dim, 1>::Zero());
-
-    SECTION("Check particle mass mapping") {
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(1.0).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle volume mapping") {
-      cell->map_particle_volume_to_nodes(shapefns_xi, phase, pvolume);
-      for (const auto& node : nodes)
-        REQUIRE(node->volume(phase) == Approx(2.0).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle momentum and pressure mapping") {
-      // Map particle mass to nodes
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(1.0).epsilon(Tolerance));
-
-      // Map momentum to nodes
-      cell->compute_nodal_momentum(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(1.0).epsilon(Tolerance));
-      }
-
-      // Update mass and momentum
-      cell->map_mass_momentum_to_nodes(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(2.0).epsilon(Tolerance));
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(2.0).epsilon(Tolerance));
-      }
-
-      // Map particle pressure to nodes
-      cell->map_pressure_to_nodes(shapefns_xi, phase, pmass, ppressure);
-      for (const auto& node : nodes)
-        REQUIRE(node->pressure(phase) == Approx(6.0).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle strain") {
-      // Particle mass
-      pmass = 40.;
-
-      // Map particle mass to nodes
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(10.0).epsilon(Tolerance));
-
-      // Map momentum to nodes
-      cell->compute_nodal_momentum(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(10.0).epsilon(Tolerance));
-      }
-
-      // Update mass and momentum
-      cell->map_mass_momentum_to_nodes(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(20.0).epsilon(Tolerance));
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(20.0).epsilon(Tolerance));
-      }
-
-      // Update particle mass
-      pmass = 80;
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-
-      // Compute nodal velocity
-      for (const auto& node : nodes) {
-        node->compute_velocity();
-        for (unsigned i = 0; i < pvelocity.size(); ++i) {
-          REQUIRE(node->momentum(phase)(i) == Approx(20.0).epsilon(Tolerance));
-          REQUIRE(node->mass(phase) == Approx(40.0).epsilon(Tolerance));
-          REQUIRE(node->velocity(phase)(i) == Approx(0.5).epsilon(Tolerance));
-        }
-      }
-
-      Eigen::VectorXd strain_rate = cell->compute_strain_rate(bmatrix, phase);
-      REQUIRE(strain_rate.size() == 3);
-      for (unsigned i = 0; i < strain_rate.size(); ++i)
-        REQUIRE(strain_rate(i) == Approx(0.).epsilon(Tolerance));
-
-      Eigen::VectorXd strain_rate_centroid =
-          cell->compute_strain_rate_centroid(phase);
-      REQUIRE(strain_rate_centroid.size() == 3);
-      for (unsigned i = 0; i < strain_rate_centroid.size(); ++i)
-        REQUIRE(strain_rate_centroid(i) == Approx(0.).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle body force mapping") {
-      // Calculate body force at nodes
-      cell->compute_nodal_body_force(shapefns_xi, phase, pmass, pgravity);
-      Eigen::Vector2d bodyforce;
-      bodyforce << 0., 9.814;
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < bodyforce.size(); ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(bodyforce(i)).epsilon(Tolerance));
-      }
-    }
-
-    SECTION("Check particle traction force mapping") {
-      // Check external force at nodes
-      for (const auto& node : nodes)
-        for (unsigned i = 0; i < Dim; ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(0.).epsilon(Tolerance));
-
-      // Apply traction force
-      Eigen::Vector2d tractionforce;
-      tractionforce << 1.5, 2.5;
-      // Calculate traction force at nodes
-      cell->compute_nodal_traction_force(shapefns_xi, phase, tractionforce);
-
-      // Check traction force
-      tractionforce *= 0.25;  // traction force * shapefn value (0.25)
-      for (const auto& node : nodes)
-        for (unsigned i = 0; i < tractionforce.size(); ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(tractionforce(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle internal force mapping") {
-      // Assign internal force to nodes
-      const double pvolume = 0.5;
-      Eigen::Matrix<double, 6, 1> pinternal_stress;
-      pinternal_stress << 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
-
-      cell->compute_nodal_internal_force(bmatrix, phase, pvolume,
-                                         pinternal_stress);
-
-      // Check internal force
-      std::vector<Eigen::Vector2d> internal_forces;
-      Eigen::Vector2d intforce;
-      // Node 0
-      intforce << -0.125, -0.125;
-      internal_forces.push_back(intforce);
-      // Node 1
-      intforce << 0., 0.;
-      internal_forces.push_back(intforce);
-      // Node 2
-      intforce << 0.125, 0.125;
-      internal_forces.push_back(intforce);
-      // Node 3
-      intforce << 0, 0;
-      internal_forces.push_back(intforce);
-
-      unsigned j = 0;
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < intforce.size(); ++i)
-          REQUIRE(node->internal_force(phase)(i) ==
-                  Approx(internal_forces.at(j)(i)).epsilon(Tolerance));
-        ++j;
-      }
-    }
-
-    SECTION("Check interpolate velocity") {
-      // Assign mass to 100
-      const double mass = 100.;
-
-      // Apply momentum
-      Eigen::Matrix<double, Dim, 1> momentum;
-      unsigned j = 1;
-      for (const auto& node : nodes) {
-        // Apply momentum
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          momentum(i) = 10. * static_cast<double>(j);
-
-        // Nodal mass
-        node->update_mass(false, phase, mass);
-        REQUIRE(node->mass(phase) == Approx(100.0).epsilon(Tolerance));
-
-        // Nodal momentum
-        node->update_momentum(false, phase, momentum);
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-
-        // Compute and check velocity
-        node->compute_velocity();
-        for (unsigned i = 0; i < Dim; ++i)
-          REQUIRE(node->velocity(phase)(i) ==
-                  Approx(0.1 * static_cast<double>(j)).epsilon(Tolerance));
-        // Increment j
-        ++j;
-      }
-      // Check interpolate velocity (0, 0)
-      Eigen::Vector2d velocity =
-          cell->interpolate_nodal_velocity(shapefns_xi, phase);
-
-      Eigen::Vector2d interpolated_velocity;
-      interpolated_velocity << 0.25, 0.25;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-
-      // Check interpolate velocity (0.5, 0.5)
-      xi << 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      velocity = cell->interpolate_nodal_velocity(shapefn_xi, phase);
-
-      interpolated_velocity << 0.2875, 0.2875;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-
-      // Check interpolate velocity (-0.5, -0.5)
-      xi << -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      velocity = cell->interpolate_nodal_velocity(shapefn_xi, phase);
-
-      interpolated_velocity << 0.1875, 0.1875;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check interpolate acceleration") {
-
-      // Apply acceleration
-      Eigen::Matrix<double, Dim, 1> acceleration;
-      unsigned j = 1;
-      for (const auto& node : nodes) {
-        // Apply acceleration
-        for (unsigned i = 0; i < acceleration.size(); ++i)
-          acceleration(i) = 10. * static_cast<double>(j);
-
-        // Nodal acceleration
-        node->update_acceleration(false, phase, acceleration);
-        for (unsigned i = 0; i < acceleration.size(); ++i)
-          REQUIRE(node->acceleration(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-        // Increment j
-        ++j;
-      }
-      // Check interpolate acceleration (0, 0)
-      Eigen::Vector2d check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefns_xi, phase);
-
-      Eigen::Vector2d interpolated_acceleration;
-      interpolated_acceleration << 25., 25.;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-
-      // Check interpolate acceleration (0.5, 0.5)
-      xi << 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefn_xi, phase);
-
-      interpolated_acceleration << 28.75, 28.75;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-
-      // Check interpolate acceleration (-0.5, -0.5)
-      xi << -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefn_xi, phase);
-
-      interpolated_acceleration << 18.75, 18.75;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check interpolate pressure") {
-      // Assign mass to 100
-      const double mass = 100.;
-
-      // Apply pressure
-      double pressure;
-      // Node counter
-      unsigned node_counter = 1;
-      for (const auto& node : nodes) {
-        // Apply pressure
-        pressure = 10. * static_cast<double>(node_counter);
-
-        // Nodal mass
-        node->update_mass(false, phase, mass);
-        REQUIRE(node->mass(phase) == Approx(100.0).epsilon(Tolerance));
-
-        // Nodal pressure
-        node->update_pressure(false, phase, mass * pressure);
-        REQUIRE(node->pressure(phase) == Approx(pressure).epsilon(Tolerance));
-        // Increment node_counter
-        ++node_counter;
-      }
-      // Check interpolate pressure (0, 0)
-      double check_pressure =
-          cell->interpolate_nodal_pressure(shapefns_xi, phase);
-
-      double interpolated_pressure;
-      interpolated_pressure = 25.;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-
-      // Check interpolate pressure (0.5, 0.5)
-      xi << 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      check_pressure = cell->interpolate_nodal_pressure(shapefn_xi, phase);
-
-      interpolated_pressure = 28.75;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-
-      // Check interpolate pressure (-0.5, -0.5)
-      xi << -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      check_pressure = cell->interpolate_nodal_pressure(shapefn_xi, phase);
-
-      interpolated_pressure = 18.75;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-    }
+  SECTION("Test nglobal particles") {
+    mpm::Index pid = 0;
+    auto cell = std::make_shared<mpm::Cell<Dim>>(0, Nnodes, element);
+    REQUIRE(cell->nglobal_particles() == 0);
+    cell->nglobal_particles(5);
+    REQUIRE(cell->nglobal_particles() == 5);
   }
 }
 
@@ -990,6 +663,15 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
     }
   }
 
+  //! Check cell rank
+  SECTION("Check cell rank") {
+    mpm::Index id = 0;
+    auto cell = std::make_shared<mpm::Cell<Dim>>(id, Nnodes, element, true);
+    REQUIRE(cell->rank() == 0);
+    cell->rank(1);
+    REQUIRE(cell->rank() == 1);
+  }
+
   // Check node additions
   SECTION("Add nodes") {
     mpm::Index id = 0;
@@ -1025,12 +707,30 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
     REQUIRE(cell->mean_length() == std::numeric_limits<double>::max());
     // Check volume before initialisation
     REQUIRE(cell->volume() ==
-            Approx(std::numeric_limits<double>::max()).epsilon(Tolerance));
+            Approx(std::numeric_limits<double>::lowest()).epsilon(Tolerance));
 
     // Initialise cell
     REQUIRE(cell->initialise() == true);
     // Check if cell is initialised, after addition of nodes
     REQUIRE(cell->is_initialised() == true);
+
+    // Check MPI rank
+    SECTION("Assign and check MPI rank on nodes") {
+      cell->rank(1);
+      cell->assign_mpi_rank_to_nodes();
+
+      REQUIRE(node0->mpi_ranks().size() == 1);
+      REQUIRE(node1->mpi_ranks().size() == 1);
+      REQUIRE(node2->mpi_ranks().size() == 1);
+      REQUIRE(node3->mpi_ranks().size() == 1);
+
+      // Update MPI rank of cell
+      REQUIRE(cell->previous_mpirank() == 0);
+      REQUIRE(cell->rank() == 1);
+      cell->rank(2);
+      REQUIRE(cell->rank() == 2);
+      REQUIRE(cell->previous_mpirank() == 1);
+    }
 
     // Check cell length calculation
     SECTION("Compute mean length of cell") {
@@ -1112,31 +812,52 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
       }
 
       SECTION("Check if a point is in a cell") {
+        Eigen::Vector3d xi;
+
         // Check point in cell
         Eigen::Vector3d point;
         point << 0.5, 0.5, 0.5;
+
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
 
         // Check point on vertex
         point << 0., 0., 0.;
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
+        REQUIRE(xi(0) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(1) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(2) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
 
         // Check point on edge
         point << 0.5, 0., 0.;
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
+        REQUIRE(xi(0) ==
+                Approx(-0.5).epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(1) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(2) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
 
         // Check point on surface
         point << 0.5, 0.5, 0.;
         REQUIRE(cell->point_in_cartesian_cell(point) == true);
-        REQUIRE(cell->is_point_in_cell(point) == true);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == true);
+        REQUIRE(xi(0) ==
+                Approx(-0.5).epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(1) ==
+                Approx(-0.5).epsilon(std::numeric_limits<double>::epsilon()));
+        REQUIRE(xi(2) == Approx(-1. + std::numeric_limits<double>::epsilon())
+                             .epsilon(std::numeric_limits<double>::epsilon()));
 
         // Check point outside
         point << 2.5, 2.5, 2.5;
         REQUIRE(cell->point_in_cartesian_cell(point) == false);
-        REQUIRE(cell->is_point_in_cell(point) == false);
+        REQUIRE(cell->is_point_in_cell(point, &xi) == false);
       }
 
       // Find local coordinates of a point in a cell
@@ -1330,6 +1051,7 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
         // Initialise cell
         REQUIRE(cell2->initialise() == true);
 
+        Eigen::Vector3d xi;
         // Check point 1
         // Coordinates of a point in real cell
         Eigen::Vector3d point1;
@@ -1340,8 +1062,8 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
         point_unit_cell1 << 0.5, 0.5, 0.5;
 
         // Check if point is in cell
-        REQUIRE(cell1->is_point_in_cell(point1) == true);
-        REQUIRE(cell2->is_point_in_cell(point1) == false);
+        REQUIRE(cell1->is_point_in_cell(point1, &xi) == true);
+        REQUIRE(cell2->is_point_in_cell(point1, &xi) == false);
 
         // Use Newton-raphson iteration to find local coordinates
         auto local_point1 = cell1->transform_real_to_unit_cell(point1);
@@ -1359,8 +1081,8 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
         point_unit_cell2 << -0.5, -0.5, -0.5;
 
         // Check if point is in cell
-        REQUIRE(cell1->is_point_in_cell(point2) == false);
-        REQUIRE(cell2->is_point_in_cell(point2) == true);
+        REQUIRE(cell1->is_point_in_cell(point2, &xi) == false);
+        REQUIRE(cell2->is_point_in_cell(point2, &xi) == true);
 
         // Use Newton-raphson iteration to find local coordinates
         auto local_point2 = cell2->transform_real_to_unit_cell(point2);
@@ -1378,8 +1100,8 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
         point_unit_cell3 << -1., -1., -1.;
 
         // Check if point is in cell
-        REQUIRE(cell1->is_point_in_cell(point3) == true);
-        REQUIRE(cell2->is_point_in_cell(point3) == false);
+        REQUIRE(cell1->is_point_in_cell(point3, &xi) == true);
+        REQUIRE(cell2->is_point_in_cell(point3, &xi) == false);
 
         // Use Newton-raphson iteration to find local coordinates
         auto local_point3 = cell1->transform_real_to_unit_cell(point3);
@@ -1397,8 +1119,8 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
         point_unit_cell4 << 1., 1., 1.;
 
         // Check if point is in cell
-        REQUIRE(cell1->is_point_in_cell(point4) == false);
-        REQUIRE(cell2->is_point_in_cell(point4) == true);
+        REQUIRE(cell1->is_point_in_cell(point4, &xi) == false);
+        REQUIRE(cell2->is_point_in_cell(point4, &xi) == true);
 
         // Use Newton-raphson iteration to find local coordinates
         auto local_point4 = cell2->transform_real_to_unit_cell(point4);
@@ -1511,16 +1233,24 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
             REQUIRE(local_point[j] ==
                     Approx(quadrature(j, i)).epsilon(Tolerance));
         }
+
+        // Assign quadrature 4x4x4
+        cell->assign_quadrature(4);
+
+        points = cell->generate_points();
+        REQUIRE(points.size() == 64);
+
+        auto quad4 = std::make_shared<mpm::HexahedronQuadrature<Dim, 64>>();
+        quadrature = quad4->quadratures();
+        // Check if the output coordinates match local quadratures
+        for (unsigned i = 0; i < points.size(); ++i) {
+          auto local_point = cell->transform_real_to_unit_cell(points.at(i));
+          for (unsigned j = 0; j < Dim; ++j)
+            REQUIRE(local_point[j] ==
+                    Approx(quadrature(j, i)).epsilon(Tolerance));
+        }
       }
     }
-  }
-
-  SECTION("Add neighbours") {
-    auto cell = std::make_shared<mpm::Cell<Dim>>(0, Nnodes, element);
-    auto neighbourcell = std::make_shared<mpm::Cell<Dim>>(1, Nnodes, element);
-    REQUIRE(cell->nneighbours() == 0);
-    cell->add_neighbour(0, neighbourcell);
-    REQUIRE(cell->nneighbours() == 1);
   }
 
   SECTION("Check shape functions") {
@@ -1558,9 +1288,12 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
     REQUIRE(cell->add_particle_id(pid) == true);
     REQUIRE(cell->status() == true);
     REQUIRE(cell->nparticles() == 1);
+    REQUIRE(cell->particles().size() == 1);
+    REQUIRE(cell->particles().at(0) == pid);
     cell->remove_particle_id(pid);
     REQUIRE(cell->status() == false);
     REQUIRE(cell->nparticles() == 0);
+    REQUIRE(cell->particles().size() == 0);
   }
 
   SECTION("Test node status") {
@@ -1667,10 +1400,13 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
 
     REQUIRE(cell->nfunctions() == 8);
 
+    REQUIRE(cell->initialise() == true);
+
+    Eigen::Vector3d xi;
     // Check point in cell
     Eigen::Vector3d point;
     point << 812482.5000000000, 815878.5000000000, 160.0825000000;
-    REQUIRE(cell->is_point_in_cell(point) == true);
+    REQUIRE(cell->is_point_in_cell(point, &xi) == true);
   }
 
   // Check if a point is in an oblique cell
@@ -1738,11 +1474,14 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
 
     REQUIRE(cell1->nfunctions() == 8);
 
+    // Initialise cell
+    REQUIRE(cell1->initialise() == true);
+
     Eigen::Vector3d xi;
     xi = cell1->transform_real_to_unit_cell(point);
 
     // Check using unit cell with affine transformation / Newton-Raphson
-    REQUIRE(cell1->is_point_in_cell(point) == true);
+    REQUIRE(cell1->is_point_in_cell(point, &xi) == true);
 
     // Cell 2
     mpm::Index id2 = 0;
@@ -1795,6 +1534,9 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
     REQUIRE(cell2->nnodes() == 8);
     REQUIRE(cell2->nfunctions() == 8);
 
+    // Initialise cell
+    REQUIRE(cell2->initialise() == true);
+
     // Point in cell fails to capture
     REQUIRE(cell2->point_in_cartesian_cell(point) == false);
 
@@ -1802,413 +1544,14 @@ TEST_CASE("Cell is checked for 3D case", "[cell][3D]") {
     xi = cell2->transform_real_to_unit_cell(point);
 
     // Check using unit cell with affine transformation / Newton-Raphson
-    REQUIRE(cell2->is_point_in_cell(point) == false);
+    REQUIRE(cell2->is_point_in_cell(point, &xi) == false);
   }
 
-  SECTION("Test particle information mapping") {
-    mpm::Index id = 0;
-    auto cell = std::make_shared<mpm::Cell<Dim>>(id, Nnodes, element);
-    cell->add_node(0, node0);
-    cell->add_node(1, node1);
-    cell->add_node(2, node2);
-    cell->add_node(3, node3);
-    cell->add_node(4, node4);
-    cell->add_node(5, node5);
-    cell->add_node(6, node6);
-    cell->add_node(7, node7);
-    REQUIRE(cell->nnodes() == 8);
-
-    // Initialise cell
-    REQUIRE(cell->initialise() == true);
-
-    // Create a vector of node pointers
-    std::vector<std::shared_ptr<mpm::NodeBase<Dim>>> nodes{
-        node0, node1, node2, node3, node4, node5, node6, node7};
-
-    // Local coordinate of a particle
-    Eigen::Vector3d xi = Eigen::Vector3d::Zero();
-
-    // Particle mass
-    double pmass = 4.;
-    // Particle pressure
-    double ppressure = 12.;
-    // Particle volume
-    double pvolume = 8.;
-    // Particle velocity
-    Eigen::Vector3d pvelocity;
-    pvelocity << 1., 1., 1.;
-    // Particle gravity
-    Eigen::Vector3d pgravity;
-    pgravity << 0., 0., 9.814;
-    // Phase
-    unsigned phase = 0;
-
-    // Nodal coords
-    Eigen::Matrix<double, 8, Dim> coords;
-    // clang-format off
-      coords << 0., 0., 0.,
-                2., 0., 0.,
-                2., 2., 0.,
-                0., 2., 0.,
-                0., 0., 2.,
-                2., 0., 2.,
-                2., 2., 2.,
-                0., 2., 2.;
-    // clang-format on
-
-    const auto shapefns_xi =
-        element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                         Eigen::Matrix<double, Dim, 1>::Zero());
-    const auto bmatrix =
-        element->bmatrix(xi, coords, Eigen::Matrix<double, Dim, 1>::Zero(),
-                         Eigen::Matrix<double, Dim, 1>::Zero());
-
-    SECTION("Check particle mass mapping") {
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(0.5).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle volume mapping") {
-      cell->map_particle_volume_to_nodes(shapefns_xi, phase, pvolume);
-      REQUIRE(nodes.size() == 8);
-      for (const auto& node : nodes)
-        REQUIRE(node->volume(phase) == Approx(1.0).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle momentum and pressure mapping") {
-      // Map particle mass to nodes
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(0.5).epsilon(Tolerance));
-
-      // Map momentum to nodes
-      cell->compute_nodal_momentum(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(0.5).epsilon(Tolerance));
-      }
-
-      // Update mass and momentum
-      cell->map_mass_momentum_to_nodes(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(1.0).epsilon(Tolerance));
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(1.0).epsilon(Tolerance));
-      }
-
-      // Map particle pressure to nodes
-      cell->map_pressure_to_nodes(shapefns_xi, phase, pmass, ppressure);
-      for (const auto& node : nodes)
-        REQUIRE(node->pressure(phase) == Approx(6.0).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle strain") {
-      // Particle mass
-      pmass = 40.;
-
-      // Map particle mass to nodes
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(5.).epsilon(Tolerance));
-
-      // Map momentum to nodes
-      cell->compute_nodal_momentum(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(5.).epsilon(Tolerance));
-      }
-
-      // Update mass and momentum
-      cell->map_mass_momentum_to_nodes(shapefns_xi, phase, pmass, pvelocity);
-      for (const auto& node : nodes)
-        REQUIRE(node->mass(phase) == Approx(10.).epsilon(Tolerance));
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < pvelocity.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) == Approx(10.).epsilon(Tolerance));
-      }
-
-      // Update particle mass
-      pmass = 80.;
-      cell->map_particle_mass_to_nodes(shapefns_xi, phase, pmass);
-
-      // Compute nodal velocity
-      for (const auto& node : nodes) {
-        node->compute_velocity();
-        for (unsigned i = 0; i < pvelocity.size(); ++i) {
-          REQUIRE(node->momentum(phase)(i) == Approx(10.0).epsilon(Tolerance));
-          REQUIRE(node->mass(phase) == Approx(20.0).epsilon(Tolerance));
-          REQUIRE(node->velocity(phase)(i) == Approx(0.5).epsilon(Tolerance));
-        }
-      }
-
-      Eigen::VectorXd strain_rate = cell->compute_strain_rate(bmatrix, phase);
-      REQUIRE(strain_rate.size() == 6);
-      for (unsigned i = 0; i < strain_rate.size(); ++i)
-        REQUIRE(strain_rate(i) == Approx(0.).epsilon(Tolerance));
-
-      Eigen::VectorXd strain_rate_centroid =
-          cell->compute_strain_rate_centroid(phase);
-      REQUIRE(strain_rate_centroid.size() == 6);
-      for (unsigned i = 0; i < strain_rate_centroid.size(); ++i)
-        REQUIRE(strain_rate_centroid(i) == Approx(0.).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle body force mapping") {
-      // Compute body force at nodes
-      cell->compute_nodal_body_force(shapefns_xi, phase, pmass, pgravity);
-      Eigen::Vector3d bodyforce;
-      bodyforce << 0., 0., 0.5 * 9.814;
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < bodyforce.size(); ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(bodyforce(i)).epsilon(Tolerance));
-      }
-    }
-
-    SECTION("Check particle traction force mapping") {
-      // Check external force at nodes
-      for (const auto& node : nodes)
-        for (unsigned i = 0; i < Dim; ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(0.).epsilon(Tolerance));
-
-      // Apply traction force
-      Eigen::Vector3d tractionforce;
-      tractionforce << 1.5, 2.5, 3.7;
-      // Calculate traction force at nodes
-      cell->compute_nodal_traction_force(shapefns_xi, phase, tractionforce);
-
-      // Check traction force
-      tractionforce *= 0.125;  // traction force * shapefn value (0.25)
-      for (const auto& node : nodes)
-        for (unsigned i = 0; i < tractionforce.size(); ++i)
-          REQUIRE(node->external_force(phase)(i) ==
-                  Approx(tractionforce(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check particle internal force mapping") {
-      // Assign internal force to nodes
-      const double pvolume = 0.5;
-      Eigen::Matrix<double, 6, 1> pinternal_stress;
-      pinternal_stress << 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
-
-      cell->compute_nodal_internal_force(bmatrix, phase, pvolume,
-                                         pinternal_stress);
-
-      // Check internal force
-      std::vector<Eigen::Vector3d> internal_forces;
-      Eigen::Vector3d intforce;
-      // Node 0
-      intforce << -0.09375, -0.09375, -0.09375;
-      internal_forces.push_back(intforce);
-      // Node 1
-      intforce << -0.03125, -0.03125, -0.03125;
-      internal_forces.push_back(intforce);
-      // Node 2
-      intforce << 0.03125, 0.03125, 0.03125;
-      internal_forces.push_back(intforce);
-      // Node 3
-      intforce << -0.03125, -0.03125, -0.03125;
-      internal_forces.push_back(intforce);
-      // Node 4
-      intforce << -0.03125, -0.03125, -0.03125;
-      internal_forces.push_back(intforce);
-      // Node 5
-      intforce << 0.03125, 0.03125, 0.03125;
-      internal_forces.push_back(intforce);
-      // Node 6
-      intforce << 0.09375, 0.09375, 0.09375;
-      internal_forces.push_back(intforce);
-      // Node 7
-      intforce << 0.03125, 0.03125, 0.03125;
-      internal_forces.push_back(intforce);
-
-      unsigned j = 0;
-      for (const auto& node : nodes) {
-        for (unsigned i = 0; i < intforce.size(); ++i)
-          REQUIRE(node->internal_force(phase)(i) ==
-                  Approx(internal_forces.at(j)(i)).epsilon(Tolerance));
-        ++j;
-      }
-    }
-
-    SECTION("Check interpolate velocity") {
-      // Assign mass to 100
-      const double mass = 100.;
-
-      // Apply momentum
-      Eigen::Matrix<double, Dim, 1> momentum;
-      unsigned j = 1;
-      for (const auto& node : nodes) {
-        // Apply momentum
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          momentum(i) = 10. * static_cast<double>(j);
-
-        // Nodal mass
-        node->update_mass(false, phase, mass);
-        REQUIRE(node->mass(phase) == Approx(100.0).epsilon(Tolerance));
-
-        // Nodal momentum
-        node->update_momentum(false, phase, momentum);
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-
-        for (unsigned i = 0; i < momentum.size(); ++i)
-          REQUIRE(node->momentum(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-
-        // Compute and check velocity
-        node->compute_velocity();
-        for (unsigned i = 0; i < Dim; ++i)
-          REQUIRE(node->velocity(phase)(i) ==
-                  Approx(0.1 * static_cast<double>(j)).epsilon(Tolerance));
-        // Increment j
-        ++j;
-      }
-      // Check interpolate velocity (0, 0)
-      xi.setZero();
-      Eigen::Vector3d velocity =
-          cell->interpolate_nodal_velocity(shapefns_xi, phase);
-
-      Eigen::Vector3d interpolated_velocity;
-      interpolated_velocity << 0.45, 0.45, 0.45;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-
-      // Check interpolate velocity (0.5, 0.5)
-      xi << 0.5, 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      velocity = cell->interpolate_nodal_velocity(shapefn_xi, phase);
-
-      interpolated_velocity << 0.5875, 0.5875, 0.5875;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-
-      // Check interpolate velocity (-0.5, -0.5)
-      xi << -0.5, -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      velocity = cell->interpolate_nodal_velocity(shapefn_xi, phase);
-
-      interpolated_velocity << 0.2875, 0.2875, 0.2875;
-      for (unsigned i = 0; i < velocity.size(); ++i)
-        REQUIRE(velocity(i) ==
-                Approx(interpolated_velocity(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check interpolate acceleration") {
-      // Apply acceleration
-      Eigen::Matrix<double, Dim, 1> acceleration;
-      unsigned j = 1;
-      for (const auto& node : nodes) {
-        // Apply acceleration
-        for (unsigned i = 0; i < acceleration.size(); ++i)
-          acceleration(i) = 10. * static_cast<double>(j);
-
-        // Nodal acceleration
-        node->update_acceleration(false, phase, acceleration);
-        for (unsigned i = 0; i < acceleration.size(); ++i)
-          REQUIRE(node->acceleration(phase)(i) ==
-                  Approx(10. * static_cast<double>(j)).epsilon(Tolerance));
-
-        // Increment j
-        ++j;
-      }
-      // Set coordinates as zero
-      xi.setZero();
-      // Check interpolate acceleration (0, 0, 0)
-      Eigen::Vector3d check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefns_xi, phase);
-
-      Eigen::Vector3d interpolated_acceleration;
-      interpolated_acceleration << 45.0, 45.0, 45.0;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-
-      // Check interpolate acceleration (0.5, 0.5, 0.5)
-      xi << 0.5, 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefn_xi, phase);
-
-      interpolated_acceleration << 58.75, 58.75, 58.75;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-
-      // Check interpolate acceleration (-0.5, -0.5, -0.5)
-      xi << -0.5, -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      check_acceleration =
-          cell->interpolate_nodal_acceleration(shapefn_xi, phase);
-
-      interpolated_acceleration << 28.75, 28.75, 28.75;
-      for (unsigned i = 0; i < check_acceleration.size(); ++i)
-        REQUIRE(check_acceleration(i) ==
-                Approx(interpolated_acceleration(i)).epsilon(Tolerance));
-    }
-
-    SECTION("Check interpolate pressure") {
-      // Assign mass to 100
-      const double mass = 100.;
-
-      // Apply pressure
-      double pressure;
-      unsigned j = 1;
-      for (const auto& node : nodes) {
-        // Apply pressure
-        pressure = 10. * static_cast<double>(j);
-
-        // Nodal mass
-        node->update_mass(false, phase, mass);
-        REQUIRE(node->mass(phase) == Approx(100.0).epsilon(Tolerance));
-
-        // Nodal pressure
-        node->update_pressure(false, phase, mass * pressure);
-        REQUIRE(node->pressure(phase) == Approx(pressure).epsilon(Tolerance));
-        // Increment j
-        ++j;
-      }
-      // Check interpolate acceleration (0, 0, 0)
-      double check_pressure =
-          cell->interpolate_nodal_pressure(shapefns_xi, phase);
-
-      double interpolated_pressure;
-      interpolated_pressure = 45.;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-
-      // Check interpolate acceleration (0.5, 0.5, 0.5)
-      xi << 0.5, 0.5, 0.5;
-      auto shapefn_xi =
-          element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                           Eigen::Matrix<double, Dim, 1>::Zero());
-      check_pressure = cell->interpolate_nodal_pressure(shapefn_xi, phase);
-
-      interpolated_pressure = 58.75;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-
-      // Check interpolate acceleration (-0.5, -0.5, -0.5)
-      xi << -0.5, -0.5, -0.5;
-      shapefn_xi = element->shapefn(xi, Eigen::Matrix<double, Dim, 1>::Zero(),
-                                    Eigen::Matrix<double, Dim, 1>::Zero());
-      check_pressure = cell->interpolate_nodal_pressure(shapefn_xi, phase);
-
-      interpolated_pressure = 28.75;
-      REQUIRE(check_pressure ==
-              Approx(interpolated_pressure).epsilon(Tolerance));
-    }
+  SECTION("Test nglobal particles") {
+    mpm::Index pid = 0;
+    auto cell = std::make_shared<mpm::Cell<Dim>>(0, Nnodes, element);
+    REQUIRE(cell->nglobal_particles() == 0);
+    cell->nglobal_particles(5);
+    REQUIRE(cell->nglobal_particles() == 5);
   }
 }

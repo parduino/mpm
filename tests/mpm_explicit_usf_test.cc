@@ -15,9 +15,14 @@ TEST_CASE("MPM 2D Explicit implementation is checked",
 
   // Write JSON file
   const std::string fname = "mpm-explicit-usf";
-  const std::string analysis = "MPMExplicitUSF2D";
+  const std::string analysis = "MPMExplicit2D";
+  const std::string stress_update = "usf";
   bool resume = false;
-  REQUIRE(mpm_test::write_json(2, resume, analysis, fname) == true);
+  REQUIRE(mpm_test::write_json(2, resume, analysis, stress_update, fname) ==
+          true);
+
+  // Write JSON Entity Sets file
+  REQUIRE(mpm_test::write_entity_set() == true);
 
   // Write Mesh
   REQUIRE(mpm_test::write_mesh_2d() == true);
@@ -39,16 +44,15 @@ TEST_CASE("MPM 2D Explicit implementation is checked",
     // Run explicit MPM
     auto mpm = std::make_unique<mpm::MPMExplicit<Dim>>(std::move(io));
 
-    // Initialise mesh and particles
-    REQUIRE(mpm->initialise_mesh() == true);
-    REQUIRE(mpm->initialise_particles() == true);
-
     // Initialise materials
     REQUIRE(mpm->initialise_materials() == true);
+    // Initialise mesh
+    REQUIRE(mpm->initialise_mesh() == true);
+    // Initialise particles
+    REQUIRE(mpm->initialise_particles() == true);
 
-    // Reinitialise mesh
-    REQUIRE(mpm->initialise_mesh() == false);
-    REQUIRE(mpm->initialise_particles() == false);
+    // Initialise external loading
+    REQUIRE(mpm->initialise_loads() == true);
 
     // Renitialise materials
     REQUIRE(mpm->initialise_materials() == false);
@@ -68,9 +72,11 @@ TEST_CASE("MPM 2D Explicit implementation is checked",
   SECTION("Check resume") {
     // Write JSON file
     const std::string fname = "mpm-explicit-usf";
-    const std::string analysis = "MPMExplicitUSF2D";
+    const std::string analysis = "MPMExplicit2D";
+    const std::string stress_update = "usf";
     bool resume = true;
-    REQUIRE(mpm_test::write_json(2, resume, analysis, fname) == true);
+    REQUIRE(mpm_test::write_json(2, resume, analysis, stress_update, fname) ==
+            true);
 
     // Create an IO object
     auto io = std::make_unique<mpm::IO>(argc, argv);
@@ -82,6 +88,15 @@ TEST_CASE("MPM 2D Explicit implementation is checked",
     // Solve
     REQUIRE(mpm->solve() == true);
   }
+
+  SECTION("Check pressure smoothing") {
+    // Create an IO object
+    auto io = std::make_unique<mpm::IO>(argc, argv);
+    // Run explicit MPM
+    auto mpm = std::make_unique<mpm::MPMExplicit<Dim>>(std::move(io));
+    // Pressure smoothing
+    REQUIRE_NOTHROW(mpm->pressure_smoothing(0));
+  }
 }
 
 // Check MPM Explicit
@@ -92,9 +107,14 @@ TEST_CASE("MPM 3D Explicit implementation is checked",
 
   // Write JSON file
   const std::string fname = "mpm-explicit-usf";
-  const std::string analysis = "MPMExplicitUSF3D";
+  const std::string analysis = "MPMExplicit3D";
+  const std::string stress_update = "usf";
   const bool resume = false;
-  REQUIRE(mpm_test::write_json(3, resume, analysis, fname) == true);
+  REQUIRE(mpm_test::write_json(3, resume, analysis, stress_update, fname) ==
+          true);
+
+  // Write JSON Entity Sets file
+  REQUIRE(mpm_test::write_entity_set() == true);
 
   // Write Mesh
   REQUIRE(mpm_test::write_mesh_3d() == true);
@@ -116,16 +136,12 @@ TEST_CASE("MPM 3D Explicit implementation is checked",
     // Run explicit MPM
     auto mpm = std::make_unique<mpm::MPMExplicit<Dim>>(std::move(io));
 
-    // Initialise mesh and particles
-    REQUIRE(mpm->initialise_mesh() == true);
-    REQUIRE(mpm->initialise_particles() == true);
-
     // Initialise materials
     REQUIRE(mpm->initialise_materials() == true);
-
-    // Reinitialise mesh and particles
-    REQUIRE(mpm->initialise_mesh() == false);
-    REQUIRE(mpm->initialise_particles() == false);
+    // Initialise mesh
+    REQUIRE(mpm->initialise_mesh() == true);
+    // Initialise particles
+    REQUIRE(mpm->initialise_particles() == true);
 
     // Renitialise materials
     REQUIRE(mpm->initialise_materials() == false);
@@ -145,9 +161,11 @@ TEST_CASE("MPM 3D Explicit implementation is checked",
   SECTION("Check resume") {
     // Write JSON file
     const std::string fname = "mpm-explicit-usf";
-    const std::string analysis = "MPMExplicitUSF3D";
+    const std::string analysis = "MPMExplicit3D";
+    const std::string stress_update = "usf";
     bool resume = true;
-    REQUIRE(mpm_test::write_json(3, resume, analysis, fname) == true);
+    REQUIRE(mpm_test::write_json(3, resume, analysis, stress_update, fname) ==
+            true);
 
     // Create an IO object
     auto io = std::make_unique<mpm::IO>(argc, argv);
@@ -158,5 +176,14 @@ TEST_CASE("MPM 3D Explicit implementation is checked",
     REQUIRE(mpm->checkpoint_resume() == true);
     // Solve
     REQUIRE(mpm->solve() == true);
+  }
+
+  SECTION("Check pressure smoothing") {
+    // Create an IO object
+    auto io = std::make_unique<mpm::IO>(argc, argv);
+    // Run explicit MPM
+    auto mpm = std::make_unique<mpm::MPMExplicit<Dim>>(std::move(io));
+    // Pressure smoothing
+    REQUIRE_NOTHROW(mpm->pressure_smoothing(0));
   }
 }
